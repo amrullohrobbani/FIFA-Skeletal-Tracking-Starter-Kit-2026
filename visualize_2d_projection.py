@@ -68,7 +68,35 @@ SKELETON_CONNECTIONS_15 = [
 ]
 
 # OPENPOSE_TO_OURS mapping (15 keypoints used in main.py)
+# our[i] corresponds to BODY25[ OPENPOSE_TO_OURS[i] ]
+# our: 0=Nose, 1=RShoulder, 2=LShoulder, 3=RElbow, 4=LElbow,
+#       5=RWrist, 6=LWrist, 7=RHip, 8=LHip, 9=RKnee,
+#       10=LKnee, 11=RAnkle, 12=LAnkle, 13=RBigToe, 14=LBigToe
 OPENPOSE_TO_OURS = [0, 2, 5, 3, 6, 4, 7, 9, 12, 10, 13, 11, 14, 22, 19]
+
+# Connections for the 15-keypoint "ours" format used in results/submission files.
+# Derived from SKELETON_CONNECTIONS_25 by mapping BODY25 indices → ours indices.
+# Neck (BODY25[1]) and MidHip (BODY25[8]) are absent, so we bridge:
+#   Neck    → RShoulder-LShoulder cross-bar + Nose-to-shoulders
+#   MidHip  → RShoulder-RHip, LShoulder-LHip, RHip-LHip cross-bar
+SKELETON_CONNECTIONS_RESULTS = [
+    (0, 1),   # Nose to RShoulder
+    (0, 2),   # Nose to LShoulder
+    (1, 2),   # RShoulder to LShoulder
+    (1, 3),   # RShoulder to RElbow
+    (3, 5),   # RElbow to RWrist
+    (2, 4),   # LShoulder to LElbow
+    (4, 6),   # LElbow to LWrist
+    (1, 7),   # RShoulder to RHip
+    (2, 8),   # LShoulder to LHip
+    (7, 8),   # RHip to LHip
+    (7, 9),   # RHip to RKnee
+    (9, 11),  # RKnee to RAnkle
+    (11, 13), # RAnkle to RBigToe
+    (8, 10),  # LHip to LKnee
+    (10, 12), # LKnee to LAnkle
+    (12, 14), # LAnkle to LBigToe
+]
 
 
 def create_video_from_images(image_dir, output_path, fps=25, cleanup_images=False):
@@ -205,35 +233,80 @@ def draw_bounding_boxes(canvas, boxes):
     return canvas
 
 
-def draw_skeleton_2d(canvas, skel_2d, boxes, num_keypoints=25):
-    """Draw 2D skeleton keypoints and connections."""
-    connections = SKELETON_CONNECTIONS_25 if num_keypoints == 25 else SKELETON_CONNECTIONS_15
-    
+def draw_skeleton_2d(canvas, skel_2d, boxes, num_keypoints=25, kp15=False):
+    """Draw 2D skeleton keypoints and connections.
+
+    If kp15=True, only draw the 15 keypoints matching the submission format
+    (selected via OPENPOSE_TO_OURS from the 25-keypoint data).
+    """
+    if kp15:
+        connections = SKELETON_CONNECTIONS_RESULTS
+    else:
+        connections = SKELETON_CONNECTIONS_25 if num_keypoints == 25 else SKELETON_CONNECTIONS_15
+
     for person_idx, skeleton in enumerate(skel_2d):
         # Skip if no bounding box
         if np.isnan(boxes[person_idx]).any():
             continue
-        
+
         # Generate consistent color per person
         color = tuple(map(int, (np.random.RandomState(person_idx).rand(3) * 200 + 55).tolist()))
-        
+
+        # Remap to 15-keypoint "ours" format if requested
+        if kp15:
+            skeleton = skeleton[OPENPOSE_TO_OURS]  # (15, 2)
+
         # Filter valid keypoints
         valid = ~np.isnan(skeleton).any(axis=1)
-        
+
         # Draw bones first (so joints are on top)
         for connection in connections:
-            if connection[0] < num_keypoints and connection[1] < num_keypoints:
-                if valid[connection[0]] and valid[connection[1]]:
-                    pt1 = tuple(skeleton[connection[0]].astype(int))
-                    pt2 = tuple(skeleton[connection[1]].astype(int))
-                    cv2.line(canvas, pt1, pt2, color, 2)
-        
+            if valid[connection[0]] and valid[connection[1]]:
+                pt1 = tuple(skeleton[connection[0]].astype(int))
+                pt2 = tuple(skeleton[connection[1]].astype(int))
+                cv2.line(canvas, pt1, pt2, color, 2)
+
         # Draw joints
         for i, (x, y) in enumerate(skeleton):
             if valid[i]:
                 cv2.circle(canvas, (int(x), int(y)), 4, color, -1)
                 cv2.circle(canvas, (int(x), int(y)), 4, (255, 255, 255), 1)
-    
+
+    return canvas
+
+
+def draw_skeleton_2d_ghost(canvas, skel_2d_frame, boxes_frame, opacity=1, num_keypoints=25, kp15=False):
+    """Draw 2D skeleton from data at reduced opacity (ghost/reference layer).
+
+    If kp15=True, only draw the 15 keypoints matching the submission format.
+    """
+    overlay = canvas.copy()
+    if kp15:
+        connections = SKELETON_CONNECTIONS_RESULTS
+    else:
+        connections = SKELETON_CONNECTIONS_25 if num_keypoints == 25 else SKELETON_CONNECTIONS_15
+
+    for person_idx, skeleton in enumerate(skel_2d_frame):
+        if np.isnan(boxes_frame[person_idx]).any():
+            continue
+        color = tuple(map(int, (np.random.RandomState(person_idx + 200).rand(3) * 150 + 50).tolist()))
+
+        if kp15:
+            skeleton = skeleton[OPENPOSE_TO_OURS]  # (15, 2)
+
+        valid = ~np.isnan(skeleton).any(axis=1)
+
+        for connection in connections:
+            if valid[connection[0]] and valid[connection[1]]:
+                pt1 = tuple(skeleton[connection[0]].astype(int))
+                pt2 = tuple(skeleton[connection[1]].astype(int))
+                cv2.line(overlay, pt1, pt2, color, 2)
+
+        for i, (x, y) in enumerate(skeleton):
+            if valid[i]:
+                cv2.circle(overlay, (int(x), int(y)), 3, color, -1)
+
+    cv2.addWeighted(overlay, opacity, canvas, 1 - opacity, 0, canvas)
     return canvas
 
 
@@ -268,9 +341,72 @@ def draw_skeleton_3d_projected(canvas, skel_3d, boxes, R, t, K, dist_coeffs, num
         # Draw joints
         for i, (x, y) in enumerate(skeleton_2d):
             if valid[i]:
-                cv2.circle(canvas, (int(x), int(y)), 5, color, -1)
-                cv2.circle(canvas, (int(x), int(y)), 5, (255, 255, 255), 1)
+                cv2.circle(canvas, (int(x), int(y)), 2, color, -1)
+                cv2.circle(canvas, (int(x), int(y)), 2, (255, 255, 255), 1)
     
+    return canvas
+
+
+def _draw_dashed_line(canvas, pt1, pt2, color, thickness=2, dash_len=8, gap_len=5):
+    """Draw a dashed line between pt1 and pt2."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    dx, dy = x2 - x1, y2 - y1
+    length = np.hypot(dx, dy)
+    if length == 0:
+        return
+    ux, uy = dx / length, dy / length  # unit vector
+    step = dash_len + gap_len
+    pos = 0.0
+    while pos < length:
+        start = pos
+        end = min(pos + dash_len, length)
+        sx, sy = int(x1 + ux * start), int(y1 + uy * start)
+        ex, ey = int(x1 + ux * end),   int(y1 + uy * end)
+        cv2.line(canvas, (sx, sy), (ex, ey), color, thickness)
+        pos += step
+
+
+def draw_results_projected(canvas, results_frame, boxes_frame, R, t, K, dist_coeffs):
+    """
+    Draw results (world-space 3D) projected to 2D.
+
+    Args:
+        results_frame: (persons, 15, 3) in world coordinates from submission NPZ
+    """
+    H_c, W_c = canvas.shape[:2]
+
+    for person_idx, skel_world in enumerate(results_frame):
+        if person_idx >= len(boxes_frame) or np.isnan(boxes_frame[person_idx]).any():
+            continue
+        valid_3d = ~np.isnan(skel_world).any(axis=1)
+        if not valid_3d.any():
+            continue
+
+        # Only project valid 3D points to avoid OpenCV producing garbage from NaN inputs
+        skel_2d = np.full((15, 2), np.nan, dtype=np.float64)
+        skel_2d[valid_3d] = project_points(skel_world[valid_3d], R, t, K, dist_coeffs)
+
+        # Also mask out any points that projected outside the canvas
+        in_bounds = (
+            (skel_2d[:, 0] >= 0) & (skel_2d[:, 0] < W_c) &
+            (skel_2d[:, 1] >= 0) & (skel_2d[:, 1] < H_c)
+        )
+        valid = valid_3d & in_bounds
+
+        color = tuple(map(int, (np.random.RandomState(person_idx + 300).rand(3) * 200 + 55).tolist()))
+
+        for connection in SKELETON_CONNECTIONS_RESULTS:
+            if valid[connection[0]] and valid[connection[1]]:
+                pt1 = tuple(skel_2d[connection[0]].astype(int))
+                pt2 = tuple(skel_2d[connection[1]].astype(int))
+                _draw_dashed_line(canvas, pt1, pt2, color, thickness=1, dash_len=2, gap_len=2)
+
+        for i in range(15):
+            if valid[i]:
+                x, y = int(skel_2d[i, 0]), int(skel_2d[i, 1])
+                cv2.circle(canvas, (x, y), 3, color, 1)  # ring with transparent centre
+
     return canvas
 
 
@@ -481,9 +617,11 @@ def draw_topdown_minimap(skel_3d_camera, boxes, camera_R, camera_t, pitch_points
     return minimap
 
 
-def create_visualization(sequence_name, frame_idx=0, show_pitch=True, show_boxes=True, 
+def create_visualization(sequence_name, frame_idx=0, show_pitch=True, show_boxes=True,
                         show_2d_skeleton=True, show_3d_projection=False,
-                        data_cache=None, use_video=False, video_cap=None, show_minimap=False):
+                        data_cache=None, use_video=False, video_cap=None, show_minimap=False,
+                        results_data=None, show_results=False, show_ghost=False, ghost_opacity=0.4,
+                        kp15=False):
     """
     Create visualization similar to main.py --visualize mode.
     
@@ -614,15 +752,24 @@ def create_visualization(sequence_name, frame_idx=0, show_pitch=True, show_boxes
     if show_boxes:
         canvas = draw_bounding_boxes(canvas, boxes[frame_idx])
     
-    # Draw 2D skeletons (from detected keypoints)
-    if show_2d_skeleton:
-        canvas = draw_skeleton_2d(canvas, skel_2d[frame_idx], boxes[frame_idx])
-    
+    # Draw 2D data skeleton: ghost (low opacity) in compare mode, full opacity otherwise
+    if show_ghost:
+        canvas = draw_skeleton_2d_ghost(canvas, skel_2d[frame_idx], boxes[frame_idx],
+                                        opacity=ghost_opacity, kp15=kp15)
+    elif show_2d_skeleton and not show_results:
+        canvas = draw_skeleton_2d(canvas, skel_2d[frame_idx], boxes[frame_idx], kp15=kp15)
+
     # Draw 3D skeletons projected to 2D (predicted positions)
     if show_3d_projection:
-        canvas = draw_skeleton_3d_projected(canvas, skel_3d[frame_idx], boxes[frame_idx], 
-                                           R, t, K, dist_coeffs)
-    
+        canvas = draw_skeleton_3d_projected(canvas, skel_3d[frame_idx], boxes[frame_idx],
+                                            R, t, K, dist_coeffs)
+
+    # Compare mode: project results (world-space) to 2D
+    if show_results and results_data is not None:
+        results_frame = results_data[:, frame_idx, :, :]  # (persons, 15, 3)
+        canvas = draw_results_projected(canvas, results_frame, boxes[frame_idx],
+                                        R, t, K, dist_coeffs)
+
     # Add info text
     info_text = f"Sequence: {sequence_name} | Frame: {frame_idx}/{len(boxes)-1}"
     cv2.putText(canvas, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
@@ -643,7 +790,17 @@ def create_visualization(sequence_name, frame_idx=0, show_pitch=True, show_boxes
         pitch_info = f"Pitch points visible: {visible_count}/{len(pitch_points)} ({100*visible_count/len(pitch_points):.1f}%)"
         cv2.putText(canvas, pitch_info, (10, 90),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-    
+
+    # Legend for results / compare mode
+    if show_results:
+        legend_y = H - 40
+        if show_ghost:
+            cv2.putText(canvas, f"Ghost (opacity={ghost_opacity:.2f}): data 2D skeleton",
+                        (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 120, 120), 1)
+            legend_y += 20
+        cv2.putText(canvas, "Solid: results projected from world 3D",
+                    (10, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1)
+
     # Add minimap (picture-in-picture)
     if show_minimap:
         # Create minimap with world coordinate transformation
@@ -680,10 +837,12 @@ def create_visualization(sequence_name, frame_idx=0, show_pitch=True, show_boxes
     return canvas
 
 
-def visualize_sequence(sequence_name, start_frame=0, num_frames=None, 
+def visualize_sequence(sequence_name, start_frame=0, num_frames=None,
                       save_video=False, save_images=False, show_live=True,
-                      show_pitch=True, show_boxes=True, show_2d_skeleton=True, 
-                      show_3d_projection=False, use_video=False, show_minimap=False):
+                      show_pitch=True, show_boxes=True, show_2d_skeleton=True,
+                      show_3d_projection=False, use_video=False, show_minimap=False,
+                      results_file=None, show_results=False, show_ghost=False, ghost_opacity=0.4,
+                      kp15=False, save_png=False):
     """
     Visualize multiple frames of a sequence.
     
@@ -725,7 +884,18 @@ def visualize_sequence(sequence_name, start_frame=0, num_frames=None,
         'skel_3d': np.load(root / "skel_3d" / f"{sequence_name}.npy"),
         'pitch_points': np.loadtxt(root / "pitch_points.txt")
     }
-    
+
+    # Load results file for compare mode
+    results_data = None
+    if results_file is not None:
+        results_npz = dict(np.load(results_file, allow_pickle=False))
+        if sequence_name in results_npz:
+            results_data = results_npz[sequence_name]  # (persons, frames, 15, 3)
+            print(f"✓ Loaded results: shape={results_data.shape}")
+        else:
+            print(f"⚠ Sequence '{sequence_name}' not found in results file: {results_file}")
+            print(f"  Available keys: {list(results_npz.keys())[:5]}")
+
     total_frames = len(data_cache['boxes'])
     print(f"Total frames: {total_frames}")
     
@@ -775,9 +945,11 @@ def visualize_sequence(sequence_name, start_frame=0, num_frames=None,
         
         # Generate first frame to get canvas size
         first_canvas = create_visualization(
-            sequence_name, start_frame, show_pitch, show_boxes, 
+            sequence_name, start_frame, show_pitch, show_boxes,
             show_2d_skeleton, show_3d_projection, data_cache=data_cache,
-            use_video=use_video, video_cap=video_cap, show_minimap=show_minimap
+            use_video=use_video, video_cap=video_cap, show_minimap=show_minimap,
+            results_data=results_data, show_results=show_results, show_ghost=show_ghost, ghost_opacity=ghost_opacity,
+            kp15=kp15
         )
         H, W = first_canvas.shape[:2]
         
@@ -805,9 +977,11 @@ def visualize_sequence(sequence_name, start_frame=0, num_frames=None,
     start_idx = start_frame + (1 if video_writer is not None and frame_count > 0 else 0)
     for frame_idx in tqdm(range(start_idx, end_frame), desc="Processing frames"):
         canvas = create_visualization(
-            sequence_name, frame_idx, show_pitch, show_boxes, 
+            sequence_name, frame_idx, show_pitch, show_boxes,
             show_2d_skeleton, show_3d_projection, data_cache=data_cache,
-            use_video=use_video, video_cap=video_cap, show_minimap=show_minimap
+            use_video=use_video, video_cap=video_cap, show_minimap=show_minimap,
+            results_data=results_data, show_results=show_results, show_ghost=show_ghost, ghost_opacity=ghost_opacity,
+            kp15=kp15
         )
         
         # Save frame to video
@@ -816,8 +990,12 @@ def visualize_sequence(sequence_name, start_frame=0, num_frames=None,
                 frame_count += 1
         
         if save_images:
-            img_path = output_dir / f"frame_{frame_idx:05d}.jpg"
-            cv2.imwrite(str(img_path), canvas)
+            if save_png:
+                img_path = output_dir / f"frame_{frame_idx:05d}.png"
+                cv2.imwrite(str(img_path), canvas, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+            else:
+                img_path = output_dir / f"frame_{frame_idx:05d}.jpg"
+                cv2.imwrite(str(img_path), canvas, [cv2.IMWRITE_JPEG_QUALITY, 100])
         
         # Show live
         if show_live:
@@ -895,8 +1073,29 @@ def main():
                        help="Use actual video/images as background (from data/videos/ or data/images/)")
     parser.add_argument("--minimap", action="store_true",
                        help="Show top-down tactical minimap (picture-in-picture)")
+    parser.add_argument("--results", "-r", type=str, default=None,
+                       help="Path to results NPZ file (e.g. outputs/submission_val.npz)")
+    parser.add_argument("--compare", action="store_true",
+                       help="Compare mode: ghost 2D data skeleton + projected results from --results file")
+    parser.add_argument("--ghost_opacity", type=float, default=0.9,
+                       help="Opacity of ghost 2D skeleton in compare mode (0.0-1.0, default: 0.4)")
+    parser.add_argument("--keypoints15", action="store_true",
+                       help="Show only the 15 submission keypoints (via OPENPOSE_TO_OURS) instead of all 25")
+    parser.add_argument("--save_png", action="store_true",
+                       help="Save images as lossless PNG instead of JPEG")
     args = parser.parse_args()
-    
+
+    # Load results when --results is provided (used for both --results alone and --compare)
+    results_data = None
+    if args.results is not None:
+        results_npz = dict(np.load(args.results, allow_pickle=False))
+        if args.sequence in results_npz:
+            results_data = results_npz[args.sequence]  # (persons, frames, 15, 3)
+            print(f"✓ Loaded results for '{args.sequence}': shape={results_data.shape}")
+        else:
+            print(f"⚠ Sequence '{args.sequence}' not found in {args.results}")
+            print(f"  Available keys: {list(results_npz.keys())[:5]}")
+
     if args.mode == 'single':
         # Single frame visualization
         canvas = create_visualization(
@@ -906,23 +1105,32 @@ def main():
             show_2d_skeleton=not args.no_skeleton,
             show_3d_projection=args.show_3d_projection,
             use_video=args.use_video,
-            show_minimap=args.minimap
+            show_minimap=args.minimap,
+            results_data=results_data,
+            show_results=args.results is not None,
+            show_ghost=args.compare,
+            ghost_opacity=args.ghost_opacity,
+            kp15=args.keypoints15
         )
-        
+
         # Save or show
         if args.save_images:
             output_dir = Path("outputs") / args.sequence
             output_dir.mkdir(parents=True, exist_ok=True)
-            img_path = output_dir / f"frame_{args.frame:05d}.jpg"
-            cv2.imwrite(str(img_path), canvas)
+            if args.save_png:
+                img_path = output_dir / f"frame_{args.frame:05d}.png"
+                cv2.imwrite(str(img_path), canvas, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+            else:
+                img_path = output_dir / f"frame_{args.frame:05d}.jpg"
+                cv2.imwrite(str(img_path), canvas, [cv2.IMWRITE_JPEG_QUALITY, 100])
             print(f"Saved to {img_path}")
-        
+
         if not args.no_live:
             cv2.imshow(f"Frame {args.frame} - {args.sequence}", canvas)
             print("Press any key to close...")
             cv2.waitKey(0)
             cv2.destroyAllWindows()
-    
+
     else:
         # Video mode
         visualize_sequence(
@@ -937,7 +1145,13 @@ def main():
             show_2d_skeleton=not args.no_skeleton,
             show_3d_projection=args.show_3d_projection,
             use_video=args.use_video,
-            show_minimap=args.minimap
+            show_minimap=args.minimap,
+            results_file=args.results,
+            show_results=args.results is not None,
+            show_ghost=args.compare,
+            ghost_opacity=args.ghost_opacity,
+            kp15=args.keypoints15,
+            save_png=args.save_png
         )
 
 

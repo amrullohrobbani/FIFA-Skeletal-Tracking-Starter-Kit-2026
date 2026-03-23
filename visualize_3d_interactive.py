@@ -254,14 +254,28 @@ class Interactive3DVisualizer:
             self.skeleton_connections = SKELETON_CONNECTIONS_15
         
         # Setup plot
-        self.fig = plt.figure(figsize=(14, 10))
+        self.fig = plt.figure(figsize=(20, 10))
         self.ax = self.fig.add_subplot(111, projection='3d')
         
-        # Store zoom state to preserve between frames
+        # Store zoom/pan state to preserve between frames
         self.stored_xlim = None
         self.stored_ylim = None
         self.stored_zlim = None
-        
+
+        # Derive default view angles from the real camera position
+        R0 = self.R[0] if len(self.R.shape) > 2 else self.R
+        t0 = self.t[0] if len(self.t.shape) > 1 else self.t
+        camera_center = -R0.T @ t0
+        field_center = np.array([
+            (self.pitch_points[:, 0].min() + self.pitch_points[:, 0].max()) / 2,
+            (self.pitch_points[:, 1].min() + self.pitch_points[:, 1].max()) / 2,
+            0.0
+        ])
+        d = camera_center - field_center          # vector from field centre → camera
+        horiz = np.sqrt(d[0]**2 + d[1]**2)
+        self.default_elev = float(np.degrees(np.arctan2(d[2], horiz)))
+        self.default_azim = float(np.degrees(np.arctan2(d[0], -d[1])))  # from -Y, CCW
+
         # Setup initial view
         self.setup_plot()
         
@@ -273,9 +287,10 @@ class Interactive3DVisualizer:
         self.anim = None
         
         print("\nControls:")
-        print("  Mouse: Rotate view")
+        print("  Mouse drag: Rotate view")
         print("  Mouse wheel: Zoom in/out")
         print("  Right-click drag: Pan view")
+        print("  Shift+Arrow keys: Pan view")
         print("  Space: Play/Pause")
         print("  Left/Right arrows: Previous/Next frame")
         print("  Up/Down arrows: Jump 10 frames")
@@ -321,10 +336,8 @@ class Interactive3DVisualizer:
         # Set aspect ratio - important for viewing
         self.ax.set_box_aspect([1.5, 1.0, 0.1])
         
-        # Set view angle (initial camera position)
-        # elev = elevation angle (higher = more from above)
-        # azim = azimuth angle (rotation around vertical axis)
-        self.ax.view_init(elev=20, azim=-60)
+        # Set view angle to match the real camera position
+        self.ax.view_init(elev=self.default_elev, azim=self.default_azim)
         
         self.update_frame()
     
@@ -527,12 +540,38 @@ class Interactive3DVisualizer:
         elif event.key == 'down':  # Jump backward 10 frames
             self.current_frame = max(0, self.current_frame - 10)
             self.update_frame()
-        elif event.key == 'r':  # Reset view
-            self.ax.view_init(elev=20, azim=-60)
+        elif event.key in ('shift+left', 'shift+right', 'shift+up', 'shift+down'):
+            self._pan(event.key)
+        elif event.key == 'r':  # Reset view to original camera position
+            self.stored_xlim = None
+            self.stored_ylim = None
+            self.stored_zlim = None
+            self.ax.view_init(elev=self.default_elev, azim=self.default_azim)
             self.update_frame()
         elif event.key == 'q':  # Quit
             plt.close(self.fig)
     
+    def _pan(self, key):
+        """Pan the view using Shift+Arrow keys."""
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+        x_step = (xlim[1] - xlim[0]) * 0.1
+        y_step = (ylim[1] - ylim[0]) * 0.1
+
+        if key == 'shift+left':
+            self.ax.set_xlim(xlim[0] - x_step, xlim[1] - x_step)
+        elif key == 'shift+right':
+            self.ax.set_xlim(xlim[0] + x_step, xlim[1] + x_step)
+        elif key == 'shift+up':
+            self.ax.set_ylim(ylim[0] + y_step, ylim[1] + y_step)
+        elif key == 'shift+down':
+            self.ax.set_ylim(ylim[0] - y_step, ylim[1] - y_step)
+
+        self.stored_xlim = self.ax.get_xlim()
+        self.stored_ylim = self.ax.get_ylim()
+        self.stored_zlim = self.ax.get_zlim()
+        self.fig.canvas.draw_idle()
+
     def on_scroll(self, event):
         """Handle mouse scroll for zoom."""
         if event.inaxes != self.ax:
