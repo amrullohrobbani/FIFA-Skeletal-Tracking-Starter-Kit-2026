@@ -27,7 +27,7 @@ def prepare_submission(output_dir: Path, split: str):
 
 
 if __name__ == "__main__":
-    output_dir = Path("outputs/")
+    output_dir = Path("output/")
     predictions_dir = output_dir / "submission_full.npz"
     if not predictions_dir.exists():
         raise FileNotFoundError(f"Predictions not found at {predictions_dir}")
